@@ -1,131 +1,171 @@
+import asyncio
+import logging
 import json
-from datetime import datetime
 import requests
-from telegram.ext import MessageHandler, filters
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Bot, KeyboardButton, \
-    ReplyKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler, ApplicationBuilder, \
-    ContextTypes
-import re
-import os
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters.command import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from math import ceil
 
-TELEGRAM_BOT_TOKEN = '6819907271:AAGmbKe8oTAyU77XKrG9dxIu24sGlwAjVgU'
-ELMA365_API_URL = 'https://fittest.bimup.dev/pub/v1/app/general_mail/EMailOutgoing/list'
-TOKEN = '309cf20e-9dd3-4262-911c-3f795dde24f3'
-COMMANDS_FILE  = 'custom_commands.json'
+PAGE_SIZE = 10
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token="6819907271:AAGmbKe8oTAyU77XKrG9dxIu24sGlwAjVgU")
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+buttons_data = {}
+def load_buttons():
+    global buttons_data
+    try:
+        with open('buttons_data.json', 'r') as f:
+            buttons_data = json.load(f)
+    except FileNotFoundError:
+        buttons_data = {}
+    return buttons_data
 
-def load_commands():
-    if os.path.exists(COMMANDS_FILE):
-        with open(COMMANDS_FILE, 'r') as file:
-            try:
-                return json.load(file)
-            except json.JSONDecodeError:
-                return {}
-    return {}
+def save_buttons():
+    with open('buttons_data.json', 'w') as f:
+        json.dump(buttons_data, f, indent=4)
+class ButtonStates(StatesGroup):
+    name = State()
+    response_keys = State()
+    url = State()
+    token = State()
+    output_option = State()
+    edit_key = State()
+    edit_value = State()
+    select_button = State()
 
+# Хэндлер на команду /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("нажмите на /create_button для создания команд.")
 
-def save_commands(commands):
-    with open(COMMANDS_FILE, 'w') as file:
-        json.dump(commands, file, indent=4)
+# Хэндлер на команду /create_button
+@dp.message(Command("create_button"))
+async def cmd_create_button(message: types.Message, state: FSMContext):
+    await message.answer("Введите имя команды:")
+    await state.set_state(ButtonStates.name)
 
+@dp.message(ButtonStates.name)
+async def process_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Введите response keys:")
+    await state.set_state(ButtonStates.response_keys)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    commands = load_commands()
-    if not commands:
-        await update.message.reply_text('Команды пока не добавлены. Пожалуйста, добавьте команду с помощью /addcommand.')
-    else:
-        keyboard = [[InlineKeyboardButton(cmd, callback_data=cmd)] for cmd in commands]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text('Выберите команду:', reply_markup=reply_markup)
+@dp.message(ButtonStates.response_keys)
+async def process_response_keys(message: types.Message, state: FSMContext):
+    await state.update_data(response_keys=message.text)
+    await message.answer("Введите URL:")
+    await state.set_state(ButtonStates.url)
 
+@dp.message(ButtonStates.url)
+async def process_url(message: types.Message, state: FSMContext):
+    await state.update_data(url=message.text)
+    await message.answer("Введите token:")
+    await state.set_state(ButtonStates.token)
 
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text('Введите название команды:')
-    context.user_data['step'] = 'name'
+@dp.message(ButtonStates.token)
+async def process_token(message: types.Message, state: FSMContext):
+    await state.update_data(token=message.text)
+    await message.answer("Введите output option:")
+    await state.set_state(ButtonStates.output_option)
 
+@dp.message(ButtonStates.output_option)
+async def process_output_option(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    data['output_option'] = message.text
+    chat_id = str(message.chat.id)
+    if chat_id not in buttons_data:
+        buttons_data[chat_id] = []
+    buttons_data[chat_id].append(data)
+    save_buttons()
+    await message.answer("Команда создана!")
+    await state.clear()
 
-async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    commands = load_commands()
-    step = context.user_data.get('step', '')
-
-    if step == 'name':
-        command_name = update.message.text
-        if command_name in commands:
-            await update.message.reply_text('Такая команда уже существует. Попробуйте снова.')
-        else:
-            commands[command_name] = {}
-            save_commands(commands)
-            await update.message.reply_text(f'Команда {command_name} добавлена.')
-            await update.message.reply_text('Введите одно или несколько значений ключа response_key через запятую:')
-            context.user_data['command_name'] = command_name
-            context.user_data['step'] = 'response_keys'
-    elif step == 'response_keys':
-        command_name = context.user_data['command_name']
-        response_keys = update.message.text.split(',')
-        response_keys = [key.strip() for key in response_keys]
-        commands[command_name]['response_keys'] = response_keys
-        save_commands(commands)
-        await update.message.reply_text('Хотите выводить все элементы из списка результатов или только первый? Введите "all" или "first".')
-        context.user_data['step'] = 'output_option'
-    elif step == 'output_option':
-        command_name = context.user_data['command_name']
-        output_option = update.message.text.lower()
-        if output_option not in ['all', 'first']:
-            await update.message.reply_text('Некорректный ввод. Пожалуйста, введите "all" или "first".')
-            return
-        commands[command_name]['output_option'] = output_option
-        save_commands(commands)
-        await update.message.reply_text('Теперь введите URL для этой команды:')
-        context.user_data['step'] = 'url'
-    elif step == 'url':
-        command_name = context.user_data['command_name']
-        url = update.message.text
-        commands[command_name]['url'] = url
-        save_commands(commands)
-        await update.message.reply_text('Введите TOKEN для этой команды:')
-        context.user_data['step'] = 'token'
-    elif step == 'token':
-        command_name = context.user_data['command_name']
-        token = update.message.text
-        commands[command_name]['token'] = token
-        save_commands(commands)
-        await update.message.reply_text('Команда добавлена успешно!')
-        context.user_data.clear()
-    else:
-        await update.message.reply_text('Неизвестный шаг. Пожалуйста, начните с команды /addcommand')
-
-
-async def handle_command_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    command_name = query.data
-    commands = load_commands()
-
-    if command_name in commands:
-        context.user_data['command_name'] = command_name
-        context.user_data['page'] = 0
-    elif command_name == 'next_page':
-        context.user_data['page'] += 1
-    elif command_name == 'prev_page' and context.user_data.get('page', 0) > 0:
-        context.user_data['page'] -= 1
-    else:
-        await query.edit_message_text('Команда не найдена.')
+# Хэндлер на команду /edit_button
+@dp.message(Command("edit_button"))
+async def cmd_edit_button(message: types.Message, state: FSMContext):
+    chat_id = str(message.chat.id)
+    if chat_id not in buttons_data or not buttons_data[chat_id]:
+        await message.answer("Нет команд для изменений.")
         return
+    buttons_list = [types.InlineKeyboardButton(text=btn['name'], callback_data=f"edit_btn_{i}")
+                    for i, btn in enumerate(buttons_data[chat_id])]
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[button] for button in buttons_list])
+    await message.answer("Выберите что хотите изменить:", reply_markup=keyboard)
+    await state.set_state(ButtonStates.select_button)
 
-    command_name = context.user_data['command_name']
-    command_data = commands.get(command_name)
-    if not command_data:
-        await query.edit_message_text('Команда не найдена.')
+@dp.callback_query(lambda c: c.data and c.data.startswith('edit_btn_'))
+async def select_button_to_edit(callback_query: types.CallbackQuery, state: FSMContext):
+    button_index = int(callback_query.data.split('_')[2])
+    chat_id = str(callback_query.message.chat.id)
+    await state.update_data(edit_index=button_index)
+    parameters = ["названия", "response_keys", "url", "token", "output_option"]
+    param_buttons = [types.InlineKeyboardButton(text=param, callback_data=f"edit_param_{param}") for param in parameters]
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[button] for button in param_buttons])
+    await bot.send_message(chat_id, "Что вы хотите изменить?", reply_markup=keyboard)
+    await callback_query.answer()
+
+@dp.callback_query(lambda c: c.data and c.data.startswith('edit_param_'))
+async def process_edit_param(callback_query: types.CallbackQuery, state: FSMContext):
+    param_to_edit = callback_query.data.split('_')[2]
+    await state.update_data(edit_key=param_to_edit)
+    await bot.send_message(callback_query.message.chat.id, f"Введите новое значение для {param_to_edit}:")
+    await state.set_state(ButtonStates.edit_value)
+    await callback_query.answer()
+
+@dp.message(ButtonStates.edit_value)
+async def process_edit_value(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = str(message.chat.id)
+    edit_index = data['edit_index']
+    edit_key = data['edit_key']
+    new_value = message.text
+    buttons_data[chat_id][edit_index][edit_key] = new_value
+    save_buttons()
+    updated_button = buttons_data[chat_id][edit_index]
+    updated_values_message = (
+        f"Имя: {updated_button['name']}\n"
+        f"Response Keys: {updated_button['response_keys']}\n"
+        f"URL: {updated_button['url']}\n"
+        f"Token: {updated_button['token']}\n"
+        f"Output Option: {updated_button['output_option']}"
+    )
+    await message.answer("Команда обновлена!\n" + updated_values_message)
+    await state.clear()
+
+# Хэндлер на команду /show_buttons
+@dp.message(Command("show_buttons"))
+async def cmd_show_buttons(message: types.Message):
+    chat_id = str(message.chat.id)
+    if chat_id not in buttons_data or not buttons_data[chat_id]:
+        await message.answer("Нет доступных команд.")
         return
+    buttons_list = [types.InlineKeyboardButton(text=btn['name'], callback_data=f"btn_{i}")
+                    for i, btn in enumerate(buttons_data[chat_id])]
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[button] for button in buttons_list])
+    await message.answer("Команды:", reply_markup=keyboard)
 
-    url = command_data['url']
-    token = command_data['token']
-    response_keys = command_data.get('response_keys', [])
-    output_option = command_data.get('output_option', 'first')
+@dp.callback_query(lambda c: c.data and (c.data.startswith('btn_') or c.data.startswith('page_')))
+async def process_button_callback(callback_query: types.CallbackQuery):
+    data_parts = callback_query.data.split('_')
+    if data_parts[0] == 'btn':
+        button_index = int(data_parts[1])
+        page = 0
+    else:  # 'page'
+        button_index = int(data_parts[1])
+        page = int(data_parts[2])
 
-    page = context.user_data.get('page', 0)
-    payload = {'active': True, 'from': page * 10, 'size': 10}
+    chat_id = str(callback_query.message.chat.id)
+    button_data = buttons_data[chat_id][button_index]
+    url = button_data['url']
+    token = button_data['token']
+    response_keys = button_data.get('response_keys', "").split(',')
+    output_option = button_data.get('output_option', 'first')
 
+    payload = {'active': True, 'from': page * PAGE_SIZE, 'size': PAGE_SIZE}
     headers = {
         'Authorization': f'Bearer {token}',
         'Content-Type': 'application/json'
@@ -136,34 +176,40 @@ async def handle_command_selection(update: Update, context: ContextTypes.DEFAULT
         response.raise_for_status()
         data = response.json()
         result = data.get('result', {}).get('result', [])
+        total_results = data.get('result', {}).get('total', len(result))
+        total_pages = ceil(total_results / PAGE_SIZE)
 
+        if not result:
+            await bot.send_message(callback_query.message.chat.id, "No results found.")
+            return
         buttons = []
-        for item in result:
-            item_values = [item.get(key, 'Ключ не найден в респонсе.') for key in response_keys]
-            button_text = ", ".join(str(value) for value in item_values if value is not None)
-            buttons.append([InlineKeyboardButton(button_text, callback_data=item['__id'])])
-
-        buttons.append([
-            InlineKeyboardButton("⬅️", callback_data="prev_page"),
-            InlineKeyboardButton("➡️", callback_data="next_page")
-        ])
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await query.edit_message_text('Выберите элемент:', reply_markup=reply_markup)
-
+        for res in result:
+            filtered_response = {key: res.get(key, 'N/A') for key in response_keys}
+            buttons.extend([types.InlineKeyboardButton(text=f"{key}: {value}", callback_data="noop") for key, value in
+                            filtered_response.items()])
+        navigation_buttons = []
+        if page > 0:
+            navigation_buttons.append(
+                types.InlineKeyboardButton(text="⬅️", callback_data=f"page_{button_index}_{page - 1}"))
+        if page < total_pages - 1:
+            navigation_buttons.append(
+                types.InlineKeyboardButton(text="➡️", callback_data=f"page_{button_index}_{page + 1}"))
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [navigation_buttons])
+        await bot.edit_message_reply_markup(chat_id=callback_query.message.chat.id,
+                                            message_id=callback_query.message.message_id, reply_markup=keyboard)
     except requests.exceptions.RequestException as e:
-        await query.edit_message_text(f"Ошибка запроса: {e}")
+        await bot.send_message(callback_query.message.chat.id, f"Error: {e}")
+
+@dp.callback_query(lambda c: c.data == "noop")
+async def noop_callback(callback_query: types.CallbackQuery):
+    await callback_query.answer()
 
 
-def main():
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+# Запуск процесса поллинга новых апдейтов
+async def main():
+    load_buttons()
+    await dp.start_polling(bot)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("addcommand", add_command))
-    application.add_handler(CallbackQueryHandler(handle_command_selection))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
-
-    application.run_polling()
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    asyncio.run(main())
