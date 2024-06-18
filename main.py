@@ -8,13 +8,13 @@ from aiogram import Router
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
-# Set up logging
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Load environment variables from .env file
+# Загрузка переменных окружения из .env файла
 load_dotenv()
 
-# Define settings using pydantic BaseSettings
+# Определение настроек с использованием pydantic BaseSettings
 class Settings(BaseSettings):
     elma_initial_token: str
     elma_initial_url: str
@@ -22,11 +22,10 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
-
-# Initialize settings
+# Инициализация настроек
 settings = Settings()
 
-# Function to fetch data from ELMA API
+# Функция для получения данных из ELMA API
 async def fetch_data(api_url, elma_token):
     headers = {
         "Authorization": f"Bearer {elma_token}",
@@ -41,7 +40,7 @@ async def fetch_data(api_url, elma_token):
                 logging.error(f"Failed to fetch data: {response.status} - {await response.text()}")
                 return None
 
-# Function to start Telegram bot
+# Функция для запуска Telegram бота
 async def start_bot(telegram_token):
     bot = Bot(token=telegram_token)
     storage = MemoryStorage()
@@ -50,14 +49,14 @@ async def start_bot(telegram_token):
 
     @router.message(F.text == '/start')
     async def send_welcome(message: types.Message):
-        # Fetch latest commands from ELMA API
+        # Получение последних команд из ELMA API
         commands_data = await fetch_data(settings.elma_command_url, settings.elma_initial_token)
         if commands_data:
             commands = [item.get("__name") for item in commands_data if "__name" in item]
         else:
             commands = []
 
-        # Create dynamic keyboard with the latest commands
+        # Создание динамической клавиатуры с последними командами
         keyboard_buttons = [
             [types.InlineKeyboardButton(text=command, callback_data=command)]
             for command in commands
@@ -72,8 +71,8 @@ async def init_microservice():
     initial_token = settings.elma_initial_token
     initial_url = settings.elma_initial_url
     command_url = settings.elma_command_url
-
-    # Fetch initial data
+    print(initial_url)
+    # Получение начальных данных
     data = await fetch_data(initial_url, initial_token)
     if data:
         first_result = data[0] if data else {}
@@ -81,7 +80,7 @@ async def init_microservice():
         elma_token = first_result.get("elma_token")
 
         if telegram_token:
-            # Start bot with initial commands
+            # Запуск бота с начальными командами
             await start_bot(telegram_token)
         else:
             logging.error("Telegram token not found.")
