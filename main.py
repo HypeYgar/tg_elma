@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 # Загрузка переменных окружения из .env файла
 load_dotenv()
 
+
 # Определение настроек с использованием pydantic BaseSettings
 class Settings(BaseSettings):
     elma_initial_token: str
@@ -22,8 +23,11 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+
+
 # Инициализация настроек
 settings = Settings()
+
 
 # Функция для получения данных из ELMA API
 async def fetch_data(api_url, elma_token):
@@ -39,6 +43,7 @@ async def fetch_data(api_url, elma_token):
             else:
                 logging.error(f"Failed to fetch data: {response.status} - {await response.text()}")
                 return None
+
 
 # Функция для запуска Telegram бота
 async def start_bot(telegram_token):
@@ -62,16 +67,67 @@ async def start_bot(telegram_token):
             for command in commands
         ]
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        await message.reply("хайп!", reply_markup=keyboard)
+        await message.reply("Выберите команду:", reply_markup=keyboard)
+
+    @router.callback_query()
+    async def handle_command(callback_query: types.CallbackQuery):
+        command_name = callback_query.data
+        # Найти соответствующую команду в данных
+        commands_data = await fetch_data(settings.elma_command_url, settings.elma_initial_token)
+        command_data = next((item for item in commands_data if item.get("__name") == command_name), None)
+
+        if command_data:
+            url_prilozheniya = command_data.get("url_prilozheniya")
+            key = command_data.get("key")
+            tip_vyvoda_tg = command_data.get("tip_vyvoda_tg", [])
+
+            # Формирование запроса по этому url и ключам
+            request_data = {tip["code"]: tip["name"] for tip in tip_vyvoda_tg}
+            headers = {
+                "Authorization": f"Bearer {settings.elma_initial_token}",
+                "Content-Type": "application/json"
+            }
+
+            if any(tip["code"] == "vyvesti_vse_znacheniya" for tip in tip_vyvoda_tg):
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url_prilozheniya, json=request_data, headers=headers) as response:
+                        if response.status == 200:
+                            result_data = await response.json()
+                            # Извлечение и отправка каждого значения из result_values в отдельном сообщении
+                            result_items = result_data.get('result', {}).get('result', [])
+                            for item in result_items:
+                                if key in item:
+                                    await bot.send_message(callback_query.from_user.id,
+                                                           f"Результат команды {command_name}:\n{item[key]}")
+                        else:
+                            await bot.send_message(callback_query.from_user.id,
+                                                   f"Ошибка при выполнении команды {command_name}: {response.status} - {await response.text()}")
+
+            elif any(tip["code"] == "poisk_po_znacheniyu" for tip in tip_vyvoda_tg):
+                await bot.send_message(callback_query.from_user.id, "Пожалуйста, отправьте значение для поиска.")
+                @router.message()
+                async def handle_search_value(message: types.Message):
+                    search_value = message.text
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url_prilozheniya, json=request_data, headers=headers) as response:
+                            if response.status == 200:
+                                result_data = await response.json()
+                                result_items = result_data.get('result', {}).get('result', [])
+                                for item in result_items:
+                                    if search_value in item.values():
+                                        await bot.send_message(message.from_user.id,
+                                                               f"Результат поиска:\n{item}")
+                            else:
+                                await bot.send_message(message.from_user.id,
+                                                       f"Ошибка при выполнении поиска: {response.status} - {await response.text()}")
 
     dp.include_router(router)
     await dp.start_polling(bot)
-
 async def init_microservice():
     initial_token = settings.elma_initial_token
     initial_url = settings.elma_initial_url
     command_url = settings.elma_command_url
-    print(initial_url)
+
     # Получение начальных данных
     data = await fetch_data(initial_url, initial_token)
     if data:
@@ -86,6 +142,7 @@ async def init_microservice():
             logging.error("Telegram token not found.")
     else:
         logging.error("Failed to fetch initial data.")
+
 
 if __name__ == "__main__":
     asyncio.run(init_microservice())
